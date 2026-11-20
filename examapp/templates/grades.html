@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}成绩划线{% endblock %}
+{% block content %}
+<section class="card">
+  <h2>上传计分表与及格线</h2>
+  <p class="muted">
+    计分 CSV 列：<code>标准题码, 正确标准选项, 分值</code>。每个标准题码只填一次，分值为正整数。
+    换表不会改变已判定的相容卷式、作答与题项快照号，只按当前快照重算成绩。
+  </p>
+  <form method="post" action="{{ url_for('upload_scores') }}" enctype="multipart/form-data">
+    <input type="file" name="file" accept=".csv,text/csv" required>
+    <input type="text" name="pass_line" placeholder="及格线（正整数）"
+           value="{{ score.pass_line if score else '' }}" required>
+    <button type="submit">上传并重算成绩</button>
+  </form>
+  {% if score %}
+    <p class="muted small">
+      当前计分表 #{{ score.id }}：{{ score.score_items|length }} 个题码，满分 {{ score.total_points }} 分，
+      及格线 {{ score.pass_line }} 分。
+    </p>
+  {% else %}
+    <p class="muted small">尚未上传计分表。</p>
+  {% endif %}
+</section>
+
+{% if not run %}
+  <section class="card"><p class="muted">还没有题项统计结果，请先在总览导入答题数据与卷式。</p></section>
+{% elif not score %}
+  <section class="card"><p class="muted">已生成题项快照 #{{ run.id }}，上传计分表后这里将发布成绩名单。</p></section>
+{% elif not grades %}
+  <section class="card"><p class="muted">题项快照 #{{ run.id }} 尚无成绩记录，等待计分任务完成。</p></section>
+{% else %}
+<section class="card">
+  <div class="row-between">
+    <h2>
+      成绩名单
+      <span class="muted small">
+        题项快照 #{{ grades.run_id }} · 计分表 #{{ grades.score_id }} ·
+        及格线 {{ grades.pass_line }} 分 · {{ grades.graded_at }}
+      </span>
+    </h2>
+  </div>
+
+  {% if grades.paused %}
+    <div class="banner error">
+      题项快照 #{{ grades.run_id }} 中以下题码与正确选项在所有卷式里都找不到，
+      <strong>题项统计照常发布，成绩供数暂停</strong>；请补交或订正卷式后重算：
+    </div>
+    <table class="compact">
+      <thead><tr><th>标准题码</th><th>正确标准选项</th><th>分值</th></tr></thead>
+      <tbody>
+      {% for it in grades.invalid_items %}
+        <tr>
+          <td class="code">{{ it.std_code }}</td>
+          <td>{{ it.std_option }}</td>
+          <td>{{ it.points }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    {% set ns = namespace(pass=0, fail=0, rescan=0) %}
+    {% for g in grades.grades %}
+      {% if g.verdict == 'pass' %}{% set ns.pass = ns.pass + 1 %}
+      {% elif g.verdict == 'fail' %}{% set ns.fail = ns.fail + 1 %}
+      {% else %}{% set ns.rescan = ns.rescan + 1 %}{% endif %}
+    {% endfor %}
+    <p class="muted small">
+      共 {{ grades.grades|length }} 张有相容卷式的卡：
+      <span class="tag ok">及格 {{ ns.pass }}</span>
+      <span class="tag danger">不及格 {{ ns.fail }}</span>
+      <span class="tag warn">待复扫 {{ ns.rescan }}</span>
+    </p>
+    <div class="table-wrap">
+    <table class="stats">
+      <thead>
+        <tr>
+          <th>卡号</th>
+          <th>最低分（卷式）</th>
+          <th>最高分（卷式）</th>
+          <th>各相容卷式总分</th>
+          <th>判定</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for g in grades.grades %}
+        <tr>
+          <td class="code">{{ g.card_no }}</td>
+          <td>{{ g.min_score }}<span class="muted small">（{{ g.min_form }}）</span></td>
+          <td>{{ g.max_score }}<span class="muted small">（{{ g.max_form }}）</span></td>
+          <td class="score-detail">
+            {% for name, total in g.scores.items() %}
+              <span class="chip">{{ name }}：{{ total }}</span>
+            {% endfor %}
+          </td>
+          <td>
+            {% if g.verdict == 'pass' %}<span class="tag ok">及格</span>
+            {% elif g.verdict == 'fail' %}<span class="tag danger">不及格</span>
+            {% else %}<span class="tag warn">待复扫</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    <p class="muted small">
+      判定规则：每个相容卷式按实扫作答独立计算整卡总分，漏答、答错或该卷式未出该题均记零；
+      最低分达到及格线判<strong>及格</strong>，最高分低于及格线判<strong>不及格</strong>，其余为<strong>待复扫</strong>。
+    </p>
+  {% endif %}
+</section>
+
+{% if run.unmatched %}
+<section class="card">
+  <h2>无相容卷式的卡 <span class="badge">{{ run.unmatched|length }}</span>
+    <span class="muted small">题项快照 #{{ run.id }}</span></h2>
+  <p class="muted">这些卡不参与成绩计算，补交或订正卷式后自动重判。</p>
+  <table class="compact">
+    <thead><tr><th>卡号</th><th>说明</th></tr></thead>
+    <tbody>
+    {% for u in run.unmatched %}
+      <tr><td>{{ u.card_no }}</td><td class="muted">{{ u.detail }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}

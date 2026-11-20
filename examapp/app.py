@@ -186,7 +186,12 @@ class JobWorker:
 
 
 def _apply_mutation(conn, kind: str, payload: dict) -> int:
-    """Mutate + analyse + persist in one transaction. Returns new run id."""
+    """Mutate + analyse + persist in one transaction. Returns new run id.
+
+    ``upload_scores`` is the one exception: swapping the scoring table keeps
+    the already-judged compatible forms, answers and the item-snapshot id, so
+    it re-grades the active run instead of creating a new snapshot.
+    """
     conn.execute("BEGIN IMMEDIATE")
     try:
         if kind == "upload_answers":
@@ -197,11 +202,29 @@ def _apply_mutation(conn, kind: str, payload: dict) -> int:
             _do_correct_code(conn, payload)
         elif kind == "set_decision":
             _do_set_decision(conn, payload)
+        elif kind == "upload_scores":
+            run_id = _do_upload_scores(conn, payload)
+            set_meta(conn, "state_version",
+                     str(int(get_meta(conn, "state_version", "0")) + 1))
+            conn.execute("COMMIT")
+            return run_id
         else:
             raise ValueError(f"未知任务类型：{kind}")
 
         analysis = engine.compute(conn)
         run_id = engine.persist_run(conn, analysis, utcnow())
+        # Grade the new snapshot against the active scoring table; if an item
+        # pair has vanished from every form, stats still publish and the grade
+        # page pauses with the invalid items listed.
+        loaded = engine.load_active_score(conn)
+        if loaded is not None:
+            score_id, pass_line, items = loaded
+            grades = engine.grade(
+                engine.load_forms(conn), engine.load_card_rows(conn),
+                items, pass_line,
+            )
+            engine.replace_grades(conn, run_id, score_id, pass_line,
+                                  grades, utcnow())
         set_meta(conn, "active_run_id", str(run_id))
         set_meta(conn, "state_version",
                  str(int(get_meta(conn, "state_version", "0")) + 1))
@@ -211,6 +234,37 @@ def _apply_mutation(conn, kind: str, payload: dict) -> int:
     except Exception:
         conn.execute("ROLLBACK")
         raise
+
+
+def _do_upload_scores(conn, payload) -> int:
+    """Replace the scoring table and re-grade the active snapshot.
+
+    Forms, answers, review decisions and the run id are untouched; an invalid
+    CSV or a failed save rolls the whole job back, leaving the previous state.
+    """
+    items = engine.parse_score_csv(payload["csv"].encode("utf-8"))
+    pass_line = engine.parse_pass_line(payload.get("pass_line", ""))
+    cur = conn.execute(
+        "INSERT INTO score_tables(pass_line, created_at) VALUES (?, ?)",
+        (pass_line, utcnow()),
+    )
+    score_id = cur.lastrowid
+    conn.executemany(
+        "INSERT INTO score_items(score_id, std_code, std_option, points) "
+        "VALUES (?, ?, ?, ?)",
+        [(score_id, i["std_code"], i["std_option"], i["points"]) for i in items],
+    )
+    set_meta(conn, "active_score_id", str(score_id))
+
+    run_id = active_run_id(conn)
+    if not run_id:
+        # Nothing analysed yet: the table is stored and used by the next run.
+        return 0
+    grades = engine.grade(
+        engine.load_forms(conn), engine.load_card_rows(conn), items, pass_line,
+    )
+    engine.replace_grades(conn, run_id, score_id, pass_line, grades, utcnow())
+    return run_id
 
 
 # --------------------------------------------------------------------------
@@ -385,9 +439,47 @@ def read_run(conn, run_id: int) -> dict | None:
     }
 
 
+def read_grades(conn, run_id: int) -> dict | None:
+    """Grading output stored for a snapshot, or None if it was never graded."""
+    if not run_id:
+        return None
+    meta = conn.execute(
+        "SELECT * FROM run_grades_meta WHERE run_id = ?", (run_id,)
+    ).fetchone()
+    if meta is None:
+        return None
+    grades = [
+        dict(r) for r in conn.execute(
+            "SELECT card_no, min_score, max_score, min_form, max_form, verdict, "
+            "scores_json FROM run_grades WHERE run_id = ? "
+            "ORDER BY card_no",
+            (run_id,),
+        )
+    ]
+    for g in grades:
+        g["scores"] = json.loads(g.pop("scores_json") or "{}")
+    return {
+        "run_id": run_id,
+        "score_id": meta["score_id"],
+        "pass_line": meta["pass_line"],
+        "paused": bool(meta["paused"]),
+        "invalid_items": json.loads(meta["invalid_json"] or "[]"),
+        "graded_at": meta["graded_at"],
+        "grades": grades,
+    }
+
+
+def active_score_view(conn) -> dict | None:
+    loaded = engine.load_active_score(conn)
+    if loaded is None:
+        return None
+    score_id, pass_line, items = loaded
+    return {"id": score_id, "pass_line": pass_line, "score_items": items,
+            "total_points": sum(i["points"] for i in items)}
+
+
 def latest_job(conn):
     return conn.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 1").fetchone()
-
 
 def job_view(job) -> dict | None:
     if job is None:
@@ -482,6 +574,36 @@ def register_routes(app: Flask):
             "cards.html", run=view,
             error=request.args.get("error"), message=request.args.get("message"),
         )
+
+    @app.get("/grades")
+    def grades():
+        conn = get_db()
+        current = active_run_id(conn)
+        view = read_run(conn, current)
+        grade_view = read_grades(conn, current)
+        score = active_score_view(conn)
+        return render_template(
+            "grades.html", run=view, grades=grade_view, score=score,
+            recomputing=is_recomputing(conn),
+            job=job_view(latest_job(conn)),
+            error=request.args.get("error"), message=request.args.get("message"),
+        )
+
+    @app.post("/scores")
+    def upload_scores():
+        file = request.files.get("file")
+        if file is None or not file.filename:
+            return _back("请选择计分 CSV 文件")
+        raw = file.read()
+        try:
+            items = engine.parse_score_csv(raw)
+            pass_line = engine.parse_pass_line(request.form.get("pass_line", ""))
+        except engine.ValidationError as exc:
+            return _back(str(exc))
+        app.worker.submit("upload_scores", {
+            "csv": engine.decode_csv(raw), "pass_line": str(pass_line),
+        })
+        return _back(None, f"计分表已受理（{len(items)} 个题码，及格线 {pass_line} 分），正在重算成绩")
 
     @app.post("/answers")
     def upload_answers():

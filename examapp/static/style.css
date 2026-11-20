@@ -148,6 +148,17 @@ td.danger { color: var(--danger); font-weight: 600; }
 
 .row-between { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 
+.score-detail { text-align: left !important; white-space: nowrap; }
+.chip {
+  display: inline-block;
+  padding: 1px 8px;
+  margin: 1px 4px 1px 0;
+  border-radius: 999px;
+  background: #eef1f5;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
 .runlist { list-style: none; padding: 0; margin: 0; }
 .runlist li { display: flex; gap: 12px; align-items: baseline; padding: 5px 0; border-bottom: 1px dashed var(--line); }
 .runlist a { color: var(--accent); text-decoration: none; }

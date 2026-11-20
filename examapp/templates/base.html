@@ -12,6 +12,7 @@
   <nav>
     <a href="{{ url_for('index') }}">总览</a>
     <a href="{{ url_for('cards') }}">卡号明细</a>
+    <a href="{{ url_for('grades') }}">成绩划线</a>
   </nav>
   <span class="status" id="status-pill">
     {% if recomputing %}<span class="pill busy">重算中</span>{% else %}<span class="pill ok">统计就绪</span>{% endif %}

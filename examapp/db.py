@@ -103,6 +103,47 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at);
+
+-- Scoring (成绩划线): one scoring table per replace; uploading a new table
+-- never creates an analysis run, so the item-snapshot id stays unchanged.
+CREATE TABLE IF NOT EXISTS score_tables (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    pass_line   INTEGER NOT NULL,
+    created_at  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS score_items (
+    score_id   INTEGER NOT NULL REFERENCES score_tables(id) ON DELETE CASCADE,
+    std_code   TEXT NOT NULL,
+    std_option TEXT NOT NULL,
+    points     INTEGER NOT NULL,
+    PRIMARY KEY (score_id, std_code)
+);
+
+-- One grading row per (snapshot, card).  A run with invalid score items is
+-- persisted with paused = 1 and no card grades; the statistics snapshot itself
+-- is published normally.
+CREATE TABLE IF NOT EXISTS run_grades_meta (
+    run_id      INTEGER PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    score_id    INTEGER NOT NULL REFERENCES score_tables(id),
+    pass_line   INTEGER NOT NULL,
+    paused      INTEGER NOT NULL DEFAULT 0,
+    invalid_json TEXT NOT NULL DEFAULT '[]',
+    graded_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS run_grades (
+    run_id       INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    card_no      TEXT NOT NULL,
+    min_score    INTEGER NOT NULL,
+    max_score    INTEGER NOT NULL,
+    min_form     TEXT NOT NULL DEFAULT '',
+    max_form     TEXT NOT NULL DEFAULT '',
+    verdict      TEXT NOT NULL,         -- pass | fail | rescan
+    scores_json  TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (run_id, card_no)
+);
+CREATE INDEX IF NOT EXISTS idx_run_grades_verdict ON run_grades(run_id, verdict);
 """
 
 DEFAULT_DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "app.db")
@@ -133,6 +174,9 @@ def init_db(db_path: str) -> None:
         )
         conn.execute(
             "INSERT OR IGNORE INTO meta(key, value) VALUES ('state_version', '0')"
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO meta(key, value) VALUES ('active_score_id', '0')"
         )
         # Jobs interrupted by a restart are safe to replay: the payload is
         # persisted and each job's transaction either committed or rolled back.

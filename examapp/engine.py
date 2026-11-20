@@ -34,6 +34,12 @@ ANSWER_HEADERS = {
     "letter": {"涂选字母", "选项字母", "字母", "letter", "option", "作答"},
     "scanned_code": {"实扫题码", "扫描题码", "实扫题号", "scanned_code", "scan_code", "scanned"},
 }
+SCORE_HEADERS = {
+    "std_code": {"标准题码", "题码", "标准题号", "std_code", "code", "standard_code"},
+    "std_option": {"标准选项", "正确标准选项", "标准答案", "答案",
+                   "std_option", "standard_option", "answer"},
+    "points": {"分值", "正整数分值", "分数", "得分", "points", "score", "weight"},
+}
 
 
 def _decode(raw: bytes) -> str:
@@ -146,6 +152,46 @@ def parse_answer_csv(raw: bytes):
             {"card_no": card_no, "q_no": q_no, "letter": letter, "scanned_code": scanned}
         )
     return out
+
+
+def parse_score_csv(raw: bytes):
+    """Return [{std_code, std_option, points}, ...].
+
+    Each standard code appears exactly once, with a correct standard option
+    and a positive-integer point value.
+    """
+    rows, _ = _read_rows(raw, SCORE_HEADERS, "计分 CSV")
+    if not rows:
+        raise ValidationError("计分 CSV 没有数据行")
+    seen: set[str] = set()
+    out = []
+    for std_code, std_option, points in rows:
+        if not std_code:
+            raise ValidationError("计分行缺少标准题码")
+        if std_code in seen:
+            raise ValidationError(f"标准题码 {std_code} 在计分表中重复，每个题码只能填一次")
+        if not std_option:
+            raise ValidationError(f"题码 {std_code} 缺少正确标准选项")
+        value = points.strip()
+        if not value or not value.isdigit():
+            raise ValidationError(f"题码 {std_code} 的分值必须是正整数")
+        n = int(value)
+        if n <= 0:
+            raise ValidationError(f"题码 {std_code} 的分值必须是正整数")
+        seen.add(std_code)
+        out.append({"std_code": std_code, "std_option": std_option, "points": n})
+    return out
+
+
+def parse_pass_line(value: str) -> int:
+    """Validate the pass-line form field: a positive integer."""
+    text = (value or "").strip()
+    if not text or not text.isdigit():
+        raise ValidationError("及格线必须是正整数")
+    n = int(text)
+    if n <= 0:
+        raise ValidationError("及格线必须是正整数")
+    return n
 
 
 # --------------------------------------------------------------------------
@@ -336,6 +382,108 @@ def analyse(forms, card_rows_by_card: dict, decisions: dict) -> Analysis:
 
 
 # --------------------------------------------------------------------------
+# Grading (成绩划线)
+# --------------------------------------------------------------------------
+
+class GradeResult:
+    def __init__(self):
+        # [{std_code, std_option, points}] that no live form supports.
+        self.invalid_items: list[dict] = []
+        # One entry per card that has at least one compatible form.
+        self.grades: list[dict] = []
+        # Cards with no compatible form, listed separately.
+        self.unmatched_cards: list[str] = []
+        self.paused = False
+
+    def summary(self) -> dict:
+        verdicts = {"pass": 0, "fail": 0, "rescan": 0}
+        for g in self.grades:
+            verdicts[g["verdict"]] += 1
+        return {
+            "graded_cards": len(self.grades),
+            "unmatched_cards": len(self.unmatched_cards),
+            "invalid_items": len(self.invalid_items),
+            **verdicts,
+        }
+
+
+def find_invalid_score_items(forms, score_items: list[dict]) -> list[dict]:
+    """Score items whose (code, correct option) pair no form provides."""
+    valid_pairs = set()
+    for form in forms.values():
+        for code, opts in form["options"].items():
+            for opt in opts:
+                valid_pairs.add((code, opt))
+    return [
+        item for item in score_items
+        if (item["std_code"], item["std_option"]) not in valid_pairs
+    ]
+
+
+def grade(forms, card_rows_by_card: dict, score_items: list[dict],
+          pass_line: int) -> GradeResult:
+    """Compute per-form whole-card totals and pass/fail verdicts.
+
+    For each compatible form the card's scanned answers are scored
+    independently: a blank, a wrong option, or a question the form does not
+    print all earn zero for that item.
+    """
+    result = GradeResult()
+    result.invalid_items = find_invalid_score_items(forms, score_items)
+    if result.invalid_items:
+        # Item statistics are still published; the grades page must wait.
+        result.paused = True
+        return result
+
+    points = {item["std_code"]: item for item in score_items}
+    all_forms = list(forms.values())
+
+    for card_no in sorted(card_rows_by_card, key=_natural_key):
+        rows = card_rows_by_card[card_no]
+        compatible = [f for f in all_forms if form_is_compatible(f, rows)]
+        if not compatible:
+            result.unmatched_cards.append(card_no)
+            continue
+
+        per_form: dict[str, int] = {}
+        for form in compatible:
+            total = 0
+            for code, item in points.items():
+                q_no = form["codes"].get(code)
+                if q_no is None:
+                    continue  # form does not print this question -> 0
+                letter = rows[q_no]["letter"]
+                if not letter:
+                    continue  # blank -> 0
+                std_option = form["qmap"][q_no]["letters"].get(letter)
+                if std_option == item["std_option"]:
+                    total += item["points"]
+                # wrong option -> 0
+            per_form[form["name"]] = total
+
+        # First form achieving each extremum, in stable form order.
+        min_form = min(per_form, key=lambda n: per_form[n])
+        max_form = max(per_form, key=lambda n: per_form[n])
+        min_score, max_score = per_form[min_form], per_form[max_form]
+        if min_score >= pass_line:
+            verdict = "pass"
+        elif max_score < pass_line:
+            verdict = "fail"
+        else:
+            verdict = "rescan"
+        result.grades.append({
+            "card_no": card_no,
+            "min_score": min_score,
+            "max_score": max_score,
+            "min_form": min_form,
+            "max_form": max_form,
+            "verdict": verdict,
+            "scores": per_form,
+        })
+    return result
+
+
+# --------------------------------------------------------------------------
 # DB loading + persistence
 # --------------------------------------------------------------------------
 
@@ -374,6 +522,70 @@ def load_decisions(conn):
 
 def compute(conn) -> Analysis:
     return analyse(load_forms(conn), load_card_rows(conn), load_decisions(conn))
+
+
+# --------------------------------------------------------------------------
+# Score-table loading + grade persistence
+# --------------------------------------------------------------------------
+
+def load_active_score(conn):
+    """Return (score_id, pass_line, items) for the active table, or None."""
+    from .db import get_meta
+    try:
+        score_id = int(get_meta(conn, "active_score_id", "0"))
+    except (TypeError, ValueError):
+        score_id = 0
+    if not score_id:
+        return None
+    table = conn.execute(
+        "SELECT id, pass_line FROM score_tables WHERE id = ?", (score_id,)
+    ).fetchone()
+    if table is None:
+        return None
+    items = [
+        {"std_code": r["std_code"], "std_option": r["std_option"],
+         "points": r["points"]}
+        for r in conn.execute(
+            "SELECT std_code, std_option, points FROM score_items "
+            "WHERE score_id = ? ORDER BY std_code",
+            (score_id,),
+        )
+    ]
+    return table["id"], table["pass_line"], items
+
+
+def compute_grades(conn) -> GradeResult | None:
+    """Grade the current state against the active score table, or None."""
+    loaded = load_active_score(conn)
+    if loaded is None:
+        return None
+    score_id, pass_line, items = loaded
+    return grade(load_forms(conn), load_card_rows(conn), items, pass_line)
+
+
+def replace_grades(conn, run_id: int, score_id: int, pass_line: int,
+                   grades: GradeResult, graded_at: str) -> None:
+    """Persist grading output for one snapshot. Caller owns the transaction."""
+    import json
+    conn.execute("DELETE FROM run_grades_meta WHERE run_id = ?", (run_id,))
+    conn.execute("DELETE FROM run_grades WHERE run_id = ?", (run_id,))
+    conn.execute(
+        "INSERT INTO run_grades_meta(run_id, score_id, pass_line, paused, "
+        "invalid_json, graded_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (run_id, score_id, pass_line, 1 if grades.paused else 0,
+         json.dumps(grades.invalid_items, ensure_ascii=False), graded_at),
+    )
+    if grades.paused:
+        return
+    conn.executemany(
+        "INSERT INTO run_grades(run_id, card_no, min_score, max_score, "
+        "min_form, max_form, verdict, scores_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [(run_id, g["card_no"], g["min_score"], g["max_score"],
+          g["min_form"], g["max_form"], g["verdict"],
+          json.dumps(g["scores"], ensure_ascii=False))
+         for g in grades.grades],
+    )
 
 
 def persist_run(conn, analysis: Analysis, created_at: str) -> int:
