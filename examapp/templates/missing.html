@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="card">
+  <h2>未找到</h2>
+  <p class="muted">请求的统计快照不存在或已被清理。<a href="{{ url_for('index') }}">返回总览</a></p>
+</section>
+{% endblock %}

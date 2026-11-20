@@ -1,0 +1,40 @@
+<div class="table-wrap">
+<table class="stats">
+  <thead>
+    <tr>
+      <th rowspan="2">标准题码</th>
+      <th colspan="2" class="grp">有效作答</th>
+      <th colspan="{{ run.all_options|length if run.all_options else 1 }}" class="grp">各选项人数</th>
+      <th rowspan="2">待核</th>
+    </tr>
+    <tr>
+      <th>计入</th>
+      <th>漏答</th>
+      {% for o in run.all_options %}<th>{{ o }}</th>{% else %}<th>—</th>{% endfor %}
+    </tr>
+  </thead>
+  <tbody>
+  {% for code, s in run.stats.items() %}
+    <tr>
+      <td class="code">{{ code }}</td>
+      <td>{{ s.counted }}</td>
+      <td class="{{ 'warn' if s.blank else '' }}">{{ s.blank }}</td>
+      {% for o in run.all_options %}
+        <td>{{ s.options.get(o, 0) }}</td>
+      {% else %}
+        <td>—</td>
+      {% endfor %}
+      <td class="{{ 'danger' if s.flagged else '' }}">
+        {% if s.flagged %}
+          <a href="{{ url_for('run_detail', run_id=run.id) }}#flagged-heading" title="需人工核对">{{ s.flagged }}</a>
+        {% else %}0{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="muted small">
+  计入：相容卷式齐全且归一作答一致的卡（人工结论可覆盖）。漏答：应出该题且作答为空。待核：相容卷式间出现分歧。
+  无相容卷式的卡不参与任何题统计。
+</p>

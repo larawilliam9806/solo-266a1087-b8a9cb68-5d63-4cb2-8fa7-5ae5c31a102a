@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}题项分析{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="{{ url_for('index') }}">答题卡题项分析</a>
+  <nav>
+    <a href="{{ url_for('index') }}">总览</a>
+    <a href="{{ url_for('cards') }}">卡号明细</a>
+  </nav>
+  <span class="status" id="status-pill">
+    {% if recomputing %}<span class="pill busy">重算中</span>{% else %}<span class="pill ok">统计就绪</span>{% endif %}
+  </span>
+</header>
+
+<main>
+  {% if error %}<div class="banner error">{{ error }}</div>{% endif %}
+  {% if message %}<div class="banner ok">{{ message }}</div>{% endif %}
+  {% if job and job.status == 'failed' %}
+    <div class="banner error">
+      最近一次操作失败（{{ job.kind }}）：{{ job.error }}。<strong>原有卷式、题码、核对结论与统计保持不变。</strong>
+    </div>
+  {% elif job and job.status in ('queued', 'running') %}
+    <div class="banner info" id="recompute-banner">
+      正在重算（{{ job.kind }}）。下方展示的是最近一次成功统计，重算完成后自动刷新。
+    </div>
+  {% endif %}
+
+  {% block content %}{% endblock %}
+</main>
+
+<script>
+(function () {
+  const initialVersion = {{ version if version is defined else 0 }};
+  const pill = document.getElementById('status-pill');
+
+  async function poll() {
+    try {
+      const res = await fetch('{{ url_for("api_status") }}', {cache: 'no-store'});
+      if (!res.ok) return;
+      const data = await res.json();
+
+      if (pill) {
+        pill.innerHTML = data.recomputing
+          ? '<span class="pill busy">重算中</span>'
+          : '<span class="pill ok">统计就绪</span>';
+      }
+      if (data.version !== initialVersion) {
+        location.reload();
+      }
+    } catch (e) { /* keep polling */ }
+  }
+  poll();
+  setInterval(poll, 1500);
+})();
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

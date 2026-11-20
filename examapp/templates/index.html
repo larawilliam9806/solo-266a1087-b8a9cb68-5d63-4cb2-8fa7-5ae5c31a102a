@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block content %}
+{% if not run %}
+  <section class="card">
+    <h2>开始使用</h2>
+    <p class="muted">还没有答题数据。先在下方导入答题 CSV，再补交卷式对照 CSV；卷式变动后系统会自动重判。</p>
+  </section>
+{% endif %}
+
+<section class="grid">
+  <div class="card">
+    <h2>导入答题 CSV</h2>
+    <p class="muted">每卡每道单选题一行：<code>卡号, 题号, 涂选字母, 实扫题码</code>。后两列可留空。整体替换现有答题数据。</p>
+    <form method="post" action="{{ url_for('upload_answers') }}" enctype="multipart/form-data">
+      <input type="file" name="file" accept=".csv,text/csv" required>
+      <button type="submit">导入并重算</button>
+    </form>
+    <p class="muted small">已导入 {{ card_count }} 张卡。</p>
+  </div>
+
+  <div class="card">
+    <h2>补交卷式 CSV</h2>
+    <p class="muted">列：<code>题号, 选项字母, 标准题码, 标准选项</code>。同一标准题码在一份卷式中只出现一次；同名卷式会被整份替换。</p>
+    <form method="post" action="{{ url_for('upload_form') }}" enctype="multipart/form-data">
+      <input type="text" name="name" placeholder="卷式名称（默认取文件名）">
+      <input type="file" name="file" accept=".csv,text/csv" required>
+      <button type="submit">提交并按新卷式重判</button>
+    </form>
+    {% if forms %}
+      <table class="compact">
+        <thead><tr><th>卷式</th><th>题号数</th><th>提交时间</th></tr></thead>
+        <tbody>
+        {% for f in forms %}
+          <tr><td>{{ f.name }}</td><td>{{ f.q_count }}</td><td class="muted">{{ f.created_at }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </div>
+</section>
+
+{% if forms %}
+<section class="card">
+  <h2>订正题码</h2>
+  <p class="muted">修正某份卷式中某个印刷题号对应的标准题码（可选同时订正标准选项）。保存后立即重判受影响的卡。</p>
+  <form method="post" action="{{ url_for('correct_code') }}" class="inline-form">
+    <select name="form_id" required>
+      <option value="">选择卷式</option>
+      {% for f in forms %}<option value="{{ f.id }}">{{ f.name }}</option>{% endfor %}
+    </select>
+    <input type="text" name="q_no" placeholder="印刷题号" required>
+    <input type="text" name="new_code" placeholder="新标准题码" required>
+    <input type="text" name="new_option" placeholder="新标准选项（可选）">
+    <button type="submit">订正并重判</button>
+  </form>
+  <p class="muted small">也可以直接 <a href="{{ url_for('run_detail', run_id=run.id) if run else '#' }}">在统计页</a> 对“待核”题格做人工核对结论。</p>
+</section>
+{% endif %}
+
+{% if run %}
+<section class="card">
+  <div class="row-between">
+    <h2>按标准题统计 <span class="muted small">快照 #{{ run.id }} · {{ run.created_at }}</span></h2>
+    <a class="button ghost" href="{{ url_for('export_run', run_id=run.id) }}">导出 CSV</a>
+  </div>
+  {% include "_stats_table.html" %}
+</section>
+
+{% if run.unmatched %}
+<section class="card">
+  <h2>无可相容卷式的卡 <span class="badge">{{ run.unmatched|length }}</span></h2>
+  <p class="muted">这些卡与任何现有卷式都不吻合，暂未计入任何统计。补交或订正卷式后会自动重判。</p>
+  <table class="compact">
+    <thead><tr><th>卡号</th><th>说明</th></tr></thead>
+    <tbody>
+    {% for u in run.unmatched %}
+      <tr><td>{{ u.card_no }}</td><td class="muted">{{ u.detail }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{% if run.summary %}
+<p class="muted small">
+  共 {{ run.summary.cards_total }} 卡：{{ run.summary.cards_matched }} 卡有相容卷式，
+  {{ run.summary.cards_unmatched }} 卡单列；{{ run.summary.questions }} 道标准题，{{ run.summary.flagged_cells }} 处待核。
+</p>
+{% endif %}
+{% endif %}
+
+{% if runs|length > 1 %}
+<section class="card">
+  <h2>历史统计快照</h2>
+  <ul class="runlist">
+    {% for r in runs %}
+      <li>
+        <a href="{{ url_for('run_detail', run_id=r.id) }}">#{{ r.id }} · {{ r.created_at }}</a>
+        <span class="muted small">计入 {{ r.summary.get('cards_matched', 0) }} 卡 / 待核 {{ r.summary.get('flagged_cells', 0) }}</span>
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% endblock %}
